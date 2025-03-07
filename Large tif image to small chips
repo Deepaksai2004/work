@@ -47,3 +47,17 @@ def create_chips(input_tif, output_folder, chip_size=1024):
 
 # Example usage
 create_chips("/content/drive/MyDrive/palm tree/tree_img clip.tif", "output_chips_folder3", chip_size=1024)
+
+
+import os
+
+output_folder = "output_chips_folder3"  # Update with your actual output folder
+
+# Count the number of .tif files in the output folder
+num_chips = len([f for f in os.listdir(output_folder) if f.endswith('.tif')])
+
+print(f"Total number of chips: {num_chips}")
+
+
+
+#note if you want more number of samples you can change the image size
