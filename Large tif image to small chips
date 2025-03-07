@@ -1,0 +1,49 @@
+# Large tif image to small chips
+
+import rasterio
+import numpy as np
+import os
+from rasterio.windows import Window
+
+def create_chips(input_tif, output_folder, chip_size=1024):
+    """
+    Splits a large TIFF image into smaller chips.
+
+    :param input_tif: Path to the input TIFF image
+    :param output_folder: Directory where chips will be saved
+    :param chip_size: Size of each chip (default: 256x256 pixels)
+    """
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    with rasterio.open(input_tif) as src:
+        img_width, img_height = src.width, src.height
+
+        chip_id = 0
+        for i in range(0, img_width, chip_size):
+            for j in range(0, img_height, chip_size):
+                # Ensure the window does not exceed image boundaries
+                window = Window(i, j, min(chip_size, img_width - i), min(chip_size, img_height - j))
+                chip = src.read(window=window)
+
+                # Define output filename
+                chip_filename = os.path.join(output_folder, f'chip_{chip_id}.tif')
+                chip_id += 1
+
+                # Save chip
+                with rasterio.open(
+                    chip_filename, 'w',
+                    driver='GTiff',
+                    height=window.height,
+                    width=window.width,
+                    count=src.count,
+                    dtype=src.dtypes[0],
+                    crs=src.crs,
+                    transform=src.window_transform(window)
+                ) as dest:
+                    dest.write(chip)
+
+                print(f"Saved: {chip_filename}")
+
+# Example usage
+create_chips("/content/drive/MyDrive/palm tree/tree_img clip.tif", "output_chips_folder3", chip_size=1024)
