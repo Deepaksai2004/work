@@ -60,4 +60,4 @@ print(f"Total number of chips: {num_chips}")
 
 
 
-#note if you want more number of samples you can change the image size
+#note if you want more number of samples you can change the chip size
