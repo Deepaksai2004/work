@@ -1,0 +1,39 @@
+from osgeo import gdal, osr
+import numpy as np
+from PIL import Image
+ 
+# Paths
+original_tif_path = r"C:/Users/sures/Downloads/chips_tiff-20250305T101438Z-001/chips_tiff/chip_41.tif"
+ 
+mask_png_path= r"C:/Users/sures/Downloads/predicted_masks_png-20250306T160308Z-001/predicted_masks_png/mask_chip_41.png"
+output_tif_path = "C:/Users/sures/Downloads/chips_tiff-20250305T101438Z-001/new_geo/new_chip_41.tif"
+#C:\Users\sures\Downloads\chips_tiff-20250305T101438Z-001\geo_ref_mask tif imgs
+# Open original TIFF to get georeferencing info
+original_ds = gdal.Open(original_tif_path)
+geo_transform = original_ds.GetGeoTransform()
+projection = original_ds.GetProjection()
+width = original_ds.RasterXSize
+height = original_ds.RasterYSize
+ 
+# Open mask PNG and resize to match original TIFF size
+mask_png = Image.open(mask_png_path).convert("L")  # Convert to grayscale
+mask_png = mask_png.resize((width, height), Image.NEAREST)  # Nearest to preserve classes
+mask_array = np.array(mask_png)
+ 
+# Create new TIFF with same properties
+driver = gdal.GetDriverByName("GTiff")
+mask_tif = driver.Create(output_tif_path, width, height, 1, gdal.GDT_Byte)  # Single-band, Byte format
+mask_tif.SetGeoTransform(geo_transform)  # Set spatial reference
+mask_tif.SetProjection(projection)  # Set CRS
+ 
+# Write the mask data
+mask_tif.GetRasterBand(1).WriteArray(mask_array)
+mask_tif.FlushCache()
+mask_tif = None  # Close file
+ 
+print("GeoTIFF mask created successfully:", output_tif_path)
+
+ 
+ 
+ 
+#tif image, png format mask>>> mask as tif format
