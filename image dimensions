@@ -1,0 +1,15 @@
+from PIL import Image, ImageOps
+
+def resize_image(input_path, output_path, size=(256, 256)):
+    image = Image.open(input_path)
+    image = ImageOps.contain(image, size)  # Resize while maintaining aspect ratio
+    
+    # Create a new blank image with the desired size and paste the resized image
+    new_image = Image.new("RGB", size, (0, 0, 0))  # Black background, change as needed
+    new_image.paste(image, ((size[0] - image.size[0]) // 2, (size[1] - image.size[1]) // 2))
+    
+    new_image.save(output_path)
+    print(f"Image saved to {output_path}")
+
+# Example usage:
+resize_image("/content/Screenshot 2025-04-01 184217.png", "output.jpg")
