@@ -1,0 +1,55 @@
+import numpy as np
+import cv2
+import os
+from google.colab.patches import cv2_imshow
+
+# ==== Parameters ====
+image_width = 640   # Set your image width
+image_height = 480  # Set your image height
+txt_file = "/content/chip_222.txt"   # Change this
+output_mask_path = "mask5.png"  # Change this
+
+# ==== Create Blank Mask ====
+mask = np.zeros((image_height, image_width), dtype=np.uint8)
+
+# ==== Read YOLO Label File ====
+with open(txt_file, 'r') as f:
+    lines = f.readlines()
+
+for line in lines:
+    parts = line.strip().split()
+    if len(parts) != 5:
+        continue  # Skip bad lines
+
+    class_id = int(parts[0])
+    x_center = float(parts[1]) * image_width
+    y_center = float(parts[2]) * image_height
+    width = float(parts[3]) * image_width
+    height = float(parts[4]) * image_height
+
+    # Calculate bounding box coordinates
+    x1 = max(0, int(x_center - width / 2))
+    y1 = max(0, int(y_center - height / 2))
+    x2 = min(image_width - 1, int(x_center + width / 2))
+    y2 = min(image_height - 1, int(y_center + height / 2))
+
+    # Optional: Shift class_id +1 to avoid background confusion
+    color = class_id + 1
+
+    # Draw rectangle on mask
+    cv2.rectangle(mask, (x1, y1), (x2, y2), color, thickness=-1)
+
+# ==== Save Mask Properly ====
+# Stretch mask values before saving (0–255 range)
+mask_to_save = (mask * 255).astype(np.uint8)
+
+cv2.imwrite(output_mask_path, mask_to_save)
+
+print(f"Semantic segmentation mask saved at: {output_mask_path}")
+
+# ==== Visualize in Colab ====
+cv2_imshow(mask_to_save)
+
+# ==== (Optional) Colorful Visualization ====
+colored_mask = cv2.applyColorMap(mask_to_save, cv2.COLORMAP_JET)
+cv2_imshow(colored_mask)
