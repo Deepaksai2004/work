@@ -1,0 +1,641 @@
+# Enhanced Raster to NetCDF Converter for 3D Geological Visualization in ArcGIS Pro
+# Optimized for geological layer analysis and voxel-based 3D visualization
+
+import numpy as np
+import xarray as xr
+import rasterio
+from rasterio.crs import CRS
+import os
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from google.colab import files
+import warnings
+from datetime import datetime
+
+# Suppress specific warnings
+warnings.filterwarnings('ignore', message=".*Variable 'spatial_ref' has an unsupported number of dimensions.*")
+warnings.filterwarnings('ignore', category=UserWarning, module='rasterio')
+
+def create_geological_netcdf(input_raster_path, output_netcdf_path, 
+                           depth_values=None, variable_name="geology", 
+                           layer_thickness=100, surface_elevation=0, 
+                           force_local_crs=True):
+    """
+    Convert a raster to NetCDF format optimized for 3D geological visualization in ArcGIS Pro
+    
+    Parameters:
+    input_raster_path (str): Path to input raster file
+    output_netcdf_path (str): Path for output NetCDF file
+    depth_values (list): Specific depth values (negative for below surface)
+    variable_name (str): Name for the data variable
+    layer_thickness (float): Thickness of each geological layer
+    surface_elevation (float): Surface elevation reference
+    """
+    
+    try:
+        # Read raster using rasterio
+        with rasterio.open(input_raster_path) as src:
+            cols = src.width
+            rows = src.height
+            bands = src.count
+            transform = src.transform
+            crs = src.crs
+            bounds = src.bounds
+            
+            # Read raster data
+            if bands > 1:
+                print(f"Multi-band raster detected ({bands} bands). Using first band for geology classification.")
+                raster_array = src.read(1)
+            else:
+                raster_array = src.read(1)
+            
+            nodata_value = src.nodata
+            
+        # Handle NoData values
+        fill_value = -9999.0
+        if nodata_value is not None:
+            raster_array = np.where(raster_array == nodata_value, fill_value, raster_array)
+        else:
+            raster_array = np.where(np.isnan(raster_array), fill_value, raster_array)
+        
+        # Set up depth values for geological layers
+        if depth_values is None:
+            # Default depth values similar to your example
+            depth_values = [-7256, -11067, -14879, -18690, -22501]
+        
+        # Ensure depth values are sorted from shallow to deep (most negative)
+        depth_values = sorted(depth_values, reverse=True)  # Shallow to deep
+        num_layers = len(depth_values)
+        
+        print(f"Creating {num_layers} geological layers at depths: {depth_values}")
+        
+        # Create coordinate arrays
+        x_coords = np.linspace(bounds.left, bounds.right, cols)
+        y_coords = np.linspace(bounds.top, bounds.bottom, rows)
+        
+        # Create 3D geological data
+        # Each layer can have different geological properties based on the raster values
+        geological_data = np.zeros((num_layers, rows, cols), dtype=np.float32)
+        
+        valid_mask = raster_array != fill_value
+        
+        for i, depth in enumerate(depth_values):
+            # Create variation in geological properties with depth
+            layer_data = raster_array.copy().astype(np.float32)
+            
+            # Add depth-dependent modifications to simulate geological variation
+            if valid_mask.any():
+                # Simulate geological layering - modify values based on depth
+                depth_factor = abs(depth) / 1000.0  # Scale factor based on depth
+                layer_data[valid_mask] = layer_data[valid_mask] * (1 + 0.1 * depth_factor)
+                
+                # Add some geological complexity - vary by position and depth
+                for row in range(rows):
+                    for col in range(cols):
+                        if valid_mask[row, col]:
+                            # Add spatial and depth variation
+                            spatial_var = np.sin(row/rows * np.pi) * np.cos(col/cols * np.pi)
+                            layer_data[row, col] += spatial_var * depth_factor * 0.5
+            
+            # Set invalid areas to fill value
+            layer_data[~valid_mask] = fill_value
+            geological_data[i, :, :] = layer_data
+        
+        # Handle coordinate system for voxel layer compatibility
+        # CRITICAL: Voxel layers work best with projected coordinate systems
+        if crs and crs.is_geographic and force_local_crs:
+            print("⚠️  WARNING: Geographic CRS detected. Voxel layers work best with projected coordinate systems.")
+            print("   Consider reprojecting your raster to a local UTM or similar projected CRS.")
+            print("   For now, treating as projected coordinates (may cause display issues).")
+            x_units = "m"
+            y_units = "m" 
+            x_standard_name = "projection_x_coordinate"
+            y_standard_name = "projection_y_coordinate"
+        elif crs and crs.is_geographic:
+            x_units = "degrees_east"
+            y_units = "degrees_north"
+            x_standard_name = "longitude"
+            y_standard_name = "latitude"
+        else:
+            x_units = "m"
+            y_units = "m"
+            x_standard_name = "projection_x_coordinate"
+            y_standard_name = "projection_y_coordinate"
+        
+        # Create xarray Dataset with proper CF conventions
+        ds = xr.Dataset(
+            {
+                variable_name: (["depth", "y", "x"], geological_data, {
+                    "units": "classification",
+                    "long_name": f"Geological {variable_name} classification",
+                    "missing_value": fill_value,
+                    "grid_mapping": "spatial_ref",
+                    "coordinates": "depth y x"
+                })
+            },
+            coords={
+                "x": (["x"], x_coords, {
+                    "units": x_units,
+                    "long_name": "x coordinate of projection",
+                    "standard_name": x_standard_name,
+                    "axis": "X"
+                }),
+                "y": (["y"], y_coords, {
+                    "units": y_units,
+                    "long_name": "y coordinate of projection", 
+                    "standard_name": y_standard_name,
+                    "axis": "Y"
+                }),
+                "depth": (["depth"], depth_values, {
+                    "units": "m",
+                    "long_name": "depth below surface",
+                    "standard_name": "depth",
+                    "positive": "down",
+                    "axis": "Z",
+                    "comment": "Depth values are negative, indicating distance below surface"
+                })
+            }
+        )
+        
+        # Add spatial reference information
+        if crs:
+            epsg_code = crs.to_epsg()
+            crs_wkt = crs.to_wkt()
+            
+            # Comprehensive CRS attributes for ArcGIS Pro compatibility
+            crs_attrs = {
+                "crs_wkt": crs_wkt,
+                "spatial_ref": crs_wkt,
+                "grid_mapping_name": "latitude_longitude" if crs.is_geographic else "transverse_mercator",
+                "epsg_code": str(epsg_code) if epsg_code else "unknown",
+                "long_name": "Coordinate Reference System",
+                "comment": "Spatial reference information for ArcGIS Pro"
+            }
+            
+            if crs.is_geographic:
+                crs_attrs.update({
+                    "longitude_of_prime_meridian": 0.0,
+                    "semi_major_axis": 6378137.0,
+                    "inverse_flattening": 298.257223563
+                })
+            
+            ds["spatial_ref"] = xr.DataArray(
+                data=np.int32(epsg_code if epsg_code else 0),
+                dims=(),
+                attrs=crs_attrs
+            )
+        
+        # Enhanced global attributes for ArcGIS Pro
+        ds.attrs = {
+            "title": f"3D Geological Model: {os.path.basename(input_raster_path)}",
+            "summary": "3D geological voxel data for visualization in ArcGIS Pro",
+            "source": f"Generated from {input_raster_path}",
+            "Conventions": "CF-1.8",
+            "institution": "Geological Survey",
+            "history": f"Created on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} from raster data",
+            "references": "CF Metadata Conventions",
+            "comment": "Voxel data optimized for ArcGIS Pro 3D visualization",
+            
+            # Geospatial bounds
+            "geospatial_bounds": f"POLYGON(({bounds.left} {bounds.bottom}, {bounds.right} {bounds.bottom}, {bounds.right} {bounds.top}, {bounds.left} {bounds.top}, {bounds.left} {bounds.bottom}))",
+            "geospatial_lat_min": float(bounds.bottom),
+            "geospatial_lat_max": float(bounds.top), 
+            "geospatial_lon_min": float(bounds.left),
+            "geospatial_lon_max": float(bounds.right),
+            "geospatial_vertical_min": float(min(depth_values)),
+            "geospatial_vertical_max": float(max(depth_values)),
+            "geospatial_vertical_positive": "down",
+            
+            # Layer information
+            "depth_layers": num_layers,
+            "layer_thickness_m": layer_thickness,
+            "surface_elevation_m": surface_elevation,
+            "depth_method": "Fixed depth intervals for geological layers"
+        }
+        
+        # Optimized encoding for ArcGIS Pro
+        encoding = {
+            variable_name: {
+                "zlib": True,
+                "complevel": 6,
+                "shuffle": True,
+                "_FillValue": fill_value,
+                "dtype": "float32",
+                "chunksizes": (1, min(128, rows), min(128, cols))
+            },
+            "x": {"_FillValue": None, "dtype": "float64"},
+            "y": {"_FillValue": None, "dtype": "float64"}, 
+            "depth": {"_FillValue": None, "dtype": "float32"},
+            "spatial_ref": {"_FillValue": None, "dtype": "int32"}
+        }
+        
+        # Save to NetCDF with NETCDF4_CLASSIC format for better ArcGIS Pro compatibility
+        ds.to_netcdf(output_netcdf_path, encoding=encoding, format="NETCDF4")
+        
+        print(f"\n✓ Successfully created 3D geological NetCDF: {output_netcdf_path}")
+        print(f"  Dimensions: {cols} x {rows} x {num_layers} (X x Y x Depth)")
+        print(f"  Depth layers: {depth_values}")
+        print(f"  CRS: {crs}")
+        print(f"  Variable: {variable_name}")
+        
+        # CRITICAL TROUBLESHOOTING INFORMATION
+        print(f"\n🚨 VOXEL LAYER TROUBLESHOOTING:")
+        print(f"   ✅ Data extent: X({bounds.left:.2f}, {bounds.right:.2f}), Y({bounds.bottom:.2f}, {bounds.top:.2f})")
+        print(f"   ✅ Depth range: {min(depth_values):.1f} to {max(depth_values):.1f} m")
+        print(f"   ✅ Valid data cells: {np.sum(geological_data != fill_value):,}")
+        
+        if crs and crs.is_geographic:
+            print(f"   ⚠️  COORDINATE SYSTEM: Geographic ({crs})")
+            print(f"      → This may cause voxel display issues!")
+            print(f"      → Consider reprojecting to UTM or local projected CRS")
+        else:
+            print(f"   ✅ COORDINATE SYSTEM: Projected ({crs})")
+        
+        print("\n📋 ArcGIS Pro Setup Instructions:")
+        print("  1. ⚠️  CRITICAL: Use LOCAL SCENE (not Global Scene or Map)")
+        print("  2. 🗂️  Add NetCDF: Insert → Connections → Folder → Browse to .nc file")
+        print("  3. 🔧 Create Voxel: Geoprocessing → 'Create Voxel Layer' tool")
+        print("     - Input NetCDF: Your .nc file")
+        print("     - Variables: Select your geology variable")
+        print("     - Output location: Choose local geodatabase")
+        print("  4. 🎨 If layer won't draw:")
+        print("     - Check scene is LOCAL (not Global)")
+        print("     - Match scene CRS to data CRS")
+        print("     - Zoom to layer extent")
+        print("     - Check GPU drivers are updated")
+        print("     - Restart ArcGIS Pro if needed")
+        
+        return ds, True
+        
+    except Exception as e:
+        print(f"❌ Error creating geological NetCDF: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None, False
+
+def create_enhanced_visualization(ds, variable_name="geology", depth_idx=0):
+    """
+    Create enhanced visualization of the 3D geological data
+    """
+    try:
+        data_var = ds[variable_name]
+        fill_value = -9999.0
+        
+        # Replace fill values with NaN for visualization
+        data_var = data_var.where(data_var != fill_value)
+        
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'3D Geological Model - {variable_name.title()}', fontsize=16, fontweight='bold')
+        
+        # Plot 1: Surface layer (shallowest depth)
+        im1 = axes[0,0].imshow(data_var.isel(depth=0), 
+                              extent=[ds.x.min(), ds.x.max(), ds.y.min(), ds.y.max()],
+                              cmap='terrain', aspect='auto')
+        axes[0,0].set_title(f'Surface Layer (Depth: {float(ds.depth[0]):.0f}m)')
+        axes[0,0].set_xlabel('X Coordinate')
+        axes[0,0].set_ylabel('Y Coordinate')
+        plt.colorbar(im1, ax=axes[0,0], shrink=0.7)
+        
+        # Plot 2: Deep layer
+        deep_idx = -1  # Deepest layer
+        im2 = axes[0,1].imshow(data_var.isel(depth=deep_idx),
+                              extent=[ds.x.min(), ds.x.max(), ds.y.min(), ds.y.max()], 
+                              cmap='plasma', aspect='auto')
+        axes[0,1].set_title(f'Deep Layer (Depth: {float(ds.depth[deep_idx]):.0f}m)')
+        axes[0,1].set_xlabel('X Coordinate')
+        axes[0,1].set_ylabel('Y Coordinate')
+        plt.colorbar(im2, ax=axes[0,1], shrink=0.7)
+        
+        # Plot 3: Depth profile (cross-section)
+        mid_x = len(ds.x) // 2
+        cross_section = data_var.isel(x=mid_x).T  # Transpose for proper orientation
+        im3 = axes[1,0].imshow(cross_section, 
+                              extent=[ds.y.min(), ds.y.max(), ds.depth.min(), ds.depth.max()],
+                              cmap='RdYlBu_r', aspect='auto', origin='lower')
+        axes[1,0].set_title('Geological Cross-Section (Y-Depth)')
+        axes[1,0].set_xlabel('Y Coordinate')
+        axes[1,0].set_ylabel('Depth (m)')
+        plt.colorbar(im3, ax=axes[1,0], shrink=0.7)
+        
+        # Plot 4: Layer statistics
+        layer_stats = []
+        for i, depth in enumerate(ds.depth.values):
+            layer_data = data_var.isel(depth=i).values
+            valid_data = layer_data[~np.isnan(layer_data)]
+            if len(valid_data) > 0:
+                layer_stats.append({
+                    'depth': depth,
+                    'mean': np.mean(valid_data),
+                    'std': np.std(valid_data),
+                    'min': np.min(valid_data),
+                    'max': np.max(valid_data)
+                })
+        
+        if layer_stats:
+            depths = [s['depth'] for s in layer_stats]
+            means = [s['mean'] for s in layer_stats]
+            stds = [s['std'] for s in layer_stats]
+            
+            axes[1,1].errorbar(means, depths, xerr=stds, marker='o', capsize=5)
+            axes[1,1].set_xlabel('Mean Value')
+            axes[1,1].set_ylabel('Depth (m)')
+            axes[1,1].set_title('Layer Statistics (Mean ± Std)')
+            axes[1,1].grid(True, alpha=0.3)
+            axes[1,1].invert_yaxis()  # Deeper values at bottom
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Print dataset summary
+        print(f"\n📊 Dataset Summary:")
+        print(f"   Dimensions: {dict(ds.dims)}")
+        print(f"   Variables: {list(ds.data_vars.keys())}")
+        print(f"   Depth range: {float(ds.depth.min()):.1f} to {float(ds.depth.max()):.1f} m")
+        print(f"   Spatial extent: X({float(ds.x.min()):.1f}, {float(ds.x.max()):.1f}), Y({float(ds.y.min()):.1f}, {float(ds.y.max()):.1f})")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Visualization error: {str(e)}")
+        return False
+
+def upload_and_convert_geological():
+    """
+    Interactive function for uploading and converting raster to geological NetCDF
+    """
+    print("🗂️  Upload your geological raster file (TIF, GeoTIFF, etc.)")
+    uploaded = files.upload()
+    
+    if not uploaded:
+        print("❌ No file uploaded!")
+        return None, None
+    
+    input_file = list(uploaded.keys())[0]
+    output_file = os.path.splitext(input_file)[0] + '_geological_3d.nc'
+    
+    print(f"\n🔄 Converting {input_file} to 3D geological model...")
+    
+    # Get custom depth values
+    print("\nDepth Configuration:")
+    print("1. Use default depths: [-7256, -11067, -14879, -18690, -22501]")
+    print("2. Enter custom depth values")
+    
+    choice = input("Choose option (1 or 2): ").strip()
+    
+    if choice == "2":
+        depth_input = input("Enter comma-separated depth values (negative for below surface): ")
+        try:
+            depth_values = [float(x.strip()) for x in depth_input.split(',')]
+            # Ensure negative values
+            depth_values = [-abs(d) for d in depth_values]
+        except:
+            print("⚠️  Invalid input, using default depths")
+            depth_values = [-7256, -11067, -14879, -18690, -22501]
+    else:
+        depth_values = [-7256, -11067, -14879, -18690, -22501]
+    
+    # Get variable name
+    var_name = input("Enter variable name (default: geology): ").strip()
+    var_name = var_name if var_name else "geology"
+    
+    # Convert to NetCDF
+    ds, success = create_geological_netcdf(
+        input_file, output_file, 
+        depth_values=depth_values,
+        variable_name=var_name
+    )
+    
+    if success and ds is not None:
+        print("\n🎨 Generating visualization...")
+        create_enhanced_visualization(ds, var_name)
+        
+        print(f"\n⬇️  Downloading {output_file}...")
+        files.download(output_file)
+        
+        return ds, output_file
+    
+    return None, None
+
+def main():
+    """
+    Main function with enhanced options for geological 3D modeling
+    """
+    print("🌍 === Enhanced Geological 3D NetCDF Converter ===\n")
+    print("Optimized for ArcGIS Pro voxel visualization\n")
+    print("Options:")
+    print("1. 📤 Upload geological raster file")
+    print("2. 🌐 Use raster from URL") 
+    print("3. 🔍 Diagnose existing NetCDF file")
+    print("4. ℹ️  Show ArcGIS Pro workflow guide")
+    
+    choice = input("\nSelect option (1-4): ").strip()
+    
+    if choice == "1":
+        ds, output_file = upload_and_convert_geological()
+        
+    elif choice == "2":
+        url = input("Enter raster file URL: ").strip()
+        if url:
+            try:
+                import urllib.request
+                filename = "downloaded_raster.tif"
+                print(f"⬇️  Downloading from {url}...")
+                urllib.request.urlretrieve(url, filename)
+                
+                output_file = "geological_model_3d.nc"
+                depth_values = [-7256, -11067, -14879, -18690, -22501]
+                
+                ds, success = create_geological_netcdf(
+                    filename, output_file,
+                    depth_values=depth_values,
+                    variable_name="geology"
+                )
+                
+                if success:
+                    create_enhanced_visualization(ds, "geology")
+                    files.download(output_file)
+                    
+            except Exception as e:
+                print(f"❌ Download error: {str(e)}")
+    
+    elif choice == "3":
+        print("🔍 Upload your NetCDF file for diagnosis:")
+        uploaded = files.upload()
+        if uploaded:
+            nc_file = list(uploaded.keys())[0]
+            diagnose_voxel_issues(nc_file)
+    
+    elif choice == "4":
+        print_arcgis_workflow_guide()
+    
+    else:
+        print("❌ Invalid choice!")
+
+def diagnose_voxel_issues(netcdf_path):
+    """
+    Diagnose common issues that prevent voxel layers from drawing in ArcGIS Pro
+    """
+    print("🔍 === VOXEL LAYER DIAGNOSTIC TOOL ===\n")
+    
+    try:
+        ds = xr.open_dataset(netcdf_path)
+        
+        print("📊 DATASET ANALYSIS:")
+        print(f"   File: {netcdf_path}")
+        print(f"   Dimensions: {dict(ds.dims)}")
+        print(f"   Variables: {list(ds.data_vars.keys())}")
+        print(f"   Coordinates: {list(ds.coords.keys())}")
+        
+        # Check coordinate ranges
+        if 'x' in ds.coords and 'y' in ds.coords:
+            x_range = (float(ds.x.min()), float(ds.x.max()))
+            y_range = (float(ds.y.min()), float(ds.y.max()))
+            print(f"   X Range: {x_range[0]:.2f} to {x_range[1]:.2f}")
+            print(f"   Y Range: {y_range[0]:.2f} to {y_range[1]:.2f}")
+            
+            # Check if coordinates look like lat/lon
+            if (-180 <= x_range[0] <= 180 and -180 <= x_range[1] <= 180 and
+                -90 <= y_range[0] <= 90 and -90 <= y_range[1] <= 90):
+                print("   ⚠️  ISSUE: Coordinates appear to be Geographic (Lat/Lon)")
+                print("      → Voxel layers prefer projected coordinate systems")
+                print("      → Consider reprojecting to UTM or local CRS")
+        
+        # Check depth dimension
+        if 'depth' in ds.coords:
+            depth_range = (float(ds.depth.min()), float(ds.depth.max()))
+            print(f"   Depth Range: {depth_range[0]:.2f} to {depth_range[1]:.2f}")
+            
+            if depth_range[0] >= 0 and depth_range[1] >= 0:
+                print("   ⚠️  ISSUE: All depth values are positive")
+                print("      → Depths should be negative (below surface)")
+        
+        # Check for valid data
+        data_vars = list(ds.data_vars.keys())
+        if data_vars:
+            var_name = data_vars[0]
+            data = ds[var_name]
+            fill_value = data.attrs.get('_FillValue', -9999)
+            
+            valid_count = np.sum(data != fill_value)
+            total_count = data.size
+            valid_percent = (valid_count / total_count) * 100
+            
+            print(f"   Valid Data: {valid_count:,} / {total_count:,} cells ({valid_percent:.1f}%)")
+            
+            if valid_percent < 1:
+                print("   ⚠️  ISSUE: Very little valid data (<1%)")
+                print("      → Check fill values and data processing")
+        
+        # Check CRS information
+        if 'spatial_ref' in ds:
+            crs_info = ds.spatial_ref.attrs
+            print(f"   CRS Info: {crs_info.get('epsg_code', 'Unknown')}")
+        
+        print(f"\n🛠️  COMMON SOLUTIONS:")
+        print(f"   1. Ensure you're using a LOCAL SCENE (not Global)")
+        print(f"   2. Match scene CRS to data CRS")
+        print(f"   3. Zoom to layer extent after adding")
+        print(f"   4. Update GPU drivers")
+        print(f"   5. If geographic CRS, reproject data to UTM")
+        print(f"   6. Check 'Optimize performance' in layer properties")
+        print(f"   7. Restart ArcGIS Pro")
+        
+        ds.close()
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error reading NetCDF: {str(e)}")
+        return False
+
+def print_arcgis_workflow_guide():
+    """
+    Print detailed ArcGIS Pro workflow guide with troubleshooting
+    """
+    guide = """
+    🎯 === ArcGIS Pro 3D Geological Visualization Workflow ===
+    
+    🚨 CRITICAL FIRST STEPS:
+       1. Create a LOCAL SCENE (not Global Scene or Map)
+          • File → New → Scene → Local Scene
+          • Set coordinate system to match your data
+    
+    📥 2. IMPORT NETCDF DATA:
+       • Insert → Connections → Folder
+       • Browse to your .nc file and add it
+       • Verify the file appears in Catalog pane
+    
+    🗂️ 3. CREATE VOXEL LAYER:
+       • Geoprocessing → Search "Create Voxel Layer"
+       • Input NetCDF: Your .nc file
+       • Variables: Select geology/elevation variable
+       • Output: Local file geodatabase (.gdb)
+       • ⚠️ Do NOT use "Add Data" - use "Create Voxel Layer" tool
+    
+    🎨 4. CONFIGURE 3D VISUALIZATION:
+       • Switch to Scene View if not already active
+       • Right-click voxel layer → Properties
+       • Symbology tab:
+         - Choose Stretch or Unique Values
+         - Set color scheme (geological colors)
+         - Transparency: 30-70%
+       • Display tab:
+         - Check "Optimize performance" if needed
+         - Adjust quality settings
+    
+    🔧 5. IF VOXEL WON'T DRAW - TROUBLESHOOTING:
+       ❌ Error: "Voxel layer will not draw"
+       
+       ✅ SOLUTIONS (try in order):
+       1. Verify LOCAL SCENE (not Global)
+       2. Check coordinate system match:
+          • Scene properties → Coordinate System
+          • Should match your data CRS
+       3. Zoom to layer extent:
+          • Right-click layer → Zoom to Layer
+       4. Check data extent:
+          • Layer properties → Source tab
+          • Verify reasonable coordinate ranges
+       5. GPU/Driver issues:
+          • Update graphics drivers
+          • Restart ArcGIS Pro
+          • Restart computer
+       6. CRS issues:
+          • If data is Geographic, reproject to UTM
+          • Use projected coordinate system
+       7. Performance settings:
+          • Layer properties → Display
+          • Uncheck "Optimize performance"
+          • Try different quality settings
+    
+    📊 6. EXPLORATION TOOLS:
+       • Voxel Exploration ribbon appears when layer selected
+       • Slice tool: Cut through layers
+       • Section tool: Create cross-sections  
+       • Isosurface: Show surfaces of equal values
+       • Volume rendering: Transparent volumes
+    
+    ⚙️ PERFORMANCE OPTIMIZATION:
+       • Reduce voxel resolution for large datasets
+       • Use appropriate transparency settings
+       • Enable level-of-detail rendering
+       • Cache frequently used views
+       • Close other applications using GPU
+    
+    🎨 VISUALIZATION TIPS:
+       • Use geological color schemes
+       • Layer transparency: 40-60% optimal
+       • Combine with surface topography
+       • Add cross-sectional profiles
+       • Export high-quality renderings
+    """
+    print(guide)
+
+# Run the main function
+if __name__ == "__main__":
+    main()
+
+# Direct conversion function (uncomment to use with specific files)
+# ds = create_geological_netcdf("your_raster.tif", "geological_model.nc", 
+#                              depth_values=[-7256, -11067, -14879, -18690, -22501],
+#                              variable_name="geology")
