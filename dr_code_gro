@@ -1,0 +1,93 @@
+import numpy as np
+import xarray as xr
+import rasterio
+import os
+
+# Install rioxarray if needed
+try:
+    import rioxarray
+except ImportError:
+    !pip install rioxarray
+    import rioxarray
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Folder containing your raster files
+raster_dir = "/content/drive/MyDrive/geo"
+
+# Define raster filenames and depths
+raster_files = [
+    ("Grid_Layer_ProjectRaster1 class1.tif", -7256),
+    ("Grid_Layer_ProjectRaster1 class2.tif", -11067),
+    ("Grid_Layer_ProjectRaster1 class3.tif", -14879),
+]
+
+depths = []
+data_stack = []
+
+# Use first raster as reference
+with rasterio.open(os.path.join(raster_dir, raster_files[0][0])) as ref_ds:
+    ref_profile = ref_ds.profile
+    ref_transform = ref_ds.transform
+    ref_shape = ref_ds.read(1).shape
+    nodata = ref_ds.nodata
+    
+    # Create coordinates for x and y dimensions
+    height, width = ref_shape
+    x_coords = np.arange(width) * ref_transform.a + ref_transform.c
+    y_coords = np.arange(height) * ref_transform.e + ref_transform.f
+
+for fname, z in raster_files:
+    path = os.path.join(raster_dir, fname)
+    with rasterio.open(path) as src:
+        arr = src.read(1, out_shape=ref_shape)
+        data_stack.append(arr)
+        depths.append(z)
+
+# Stack the arrays and handle nodata values
+data_stack = np.stack(data_stack)
+data_stack = np.where(data_stack == nodata, np.nan, data_stack)
+
+# Convert depths to float32
+depths = np.array(depths, dtype=np.float32)
+
+# Create xarray DataArray without _FillValue in attributes
+elevation = xr.DataArray(
+    data=data_stack,
+    dims=["z", "y", "x"],
+    coords={
+        "z": ("z", depths),
+        "y": ("y", y_coords),
+        "x": ("x", x_coords),
+    }
+)
+
+ds = xr.Dataset({"elevation": elevation})
+
+# Add spatial reference information
+crs = ref_profile['crs']
+if crs is not None:
+    ds.rio.write_crs(crs.to_wkt(), inplace=True)
+
+# Set proper encoding for NetCDF output
+encoding = {
+    "elevation": {
+        "zlib": True,
+        "complevel": 4,
+        "_FillValue": -9999.0,
+        "dtype": "float32"
+    },
+    "z": {"_FillValue": None, "dtype": "float32"},
+    "y": {"_FillValue": None, "dtype": "float64"},
+    "x": {"_FillValue": None, "dtype": "float64"},
+    "spatial_ref": {"_FillValue": None}
+}
+
+# Ensure no _FillValue in attributes
+if "_FillValue" in ds["elevation"].attrs:
+    del ds["elevation"].attrs["_FillValue"]
+
+output_path = "/content/elevation_voxel2.nc"
+ds.to_netcdf(output_path, encoding=encoding)
+print(f"NetCDF saved to {output_path}")
