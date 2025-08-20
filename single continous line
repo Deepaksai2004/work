@@ -1,0 +1,51 @@
+#single continous line
+
+import cv2
+import numpy as np
+import rasterio
+from skimage.morphology import skeletonize
+from shapely.geometry import LineString, MultiLineString
+from shapely.ops import linemerge, unary_union
+import geopandas as gpd
+
+# ---------- STEP 1: Read the TIF image ----------
+tif_path = "/content/chip_16_new_@@.tif"
+with rasterio.open(tif_path) as src:
+    img = src.read(1)  # first band
+    transform = src.transform
+    crs = src.crs
+
+# ---------- STEP 2: Preprocess (normalize + threshold) ----------
+img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+_, binary = cv2.threshold(img_norm, 0, 255, cv2.THRESH_OTSU)
+
+# ---------- STEP 3: Skeletonization ----------
+skeleton = skeletonize(binary > 0).astype(np.uint8)
+
+# ---------- STEP 4: Extract line segments from skeleton ----------
+contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+
+lines = []
+for cnt in contours:
+    if len(cnt) > 1:
+        # Convert pixel coords -> real-world coords
+        coords = [rasterio.transform.xy(transform, y, x) for [[x, y]] in cnt]
+        line = LineString(coords)
+        if line.is_valid and line.length > 5:  # ignore tiny fragments
+            lines.append(line)
+
+# ---------- STEP 5: Merge into one continuous line ----------
+multi = MultiLineString(lines)
+merged = linemerge(unary_union(multi))  # join touching/overlapping lines
+
+# Force to LineString (not MultiLineString)
+if isinstance(merged, MultiLineString):
+    merged = linemerge(merged)
+
+simplified = merged.simplify(1.0, preserve_topology=False)  # smoother
+
+# ---------- STEP 6: Save ----------
+gdf = gpd.GeoDataFrame(geometry=[simplified], crs=crs)
+gdf.to_file("centerline5.shp")
+
+print("✅ Centerline saved as centerline2.shp with correct CRS")
