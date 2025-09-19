@@ -1,0 +1,89 @@
+import geopandas as gpd
+import os
+
+def count_polygons_in_shapefile(shapefile_path):
+    """
+    Count the total number of polygons in a shapefile
+    
+    Parameters:
+    shapefile_path (str): Path to the shapefile
+    
+    Returns:
+    dict: Dictionary containing polygon count and basic info
+    """
+    
+    try:
+        # Check if file exists
+        if not os.path.exists(shapefile_path):
+            return {"error": f"File not found: {shapefile_path}"}
+        
+        # Read the shapefile
+        print(f"Reading shapefile: {shapefile_path}")
+        gdf = gpd.read_file(shapefile_path)
+        
+        # Get basic information
+        total_features = len(gdf)
+        geometry_types = gdf.geometry.geom_type.value_counts()
+        
+        # Count polygons (including MultiPolygons)
+        polygon_count = 0
+        multipolygon_count = 0
+        
+        for geom_type, count in geometry_types.items():
+            if geom_type == 'Polygon':
+                polygon_count += count
+            elif geom_type == 'MultiPolygon':
+                multipolygon_count += count
+        
+        total_polygon_features = polygon_count + multipolygon_count
+        
+        # Get coordinate reference system
+        crs = gdf.crs
+        
+        # Get bounding box
+        bounds = gdf.total_bounds
+        
+        return {
+            "total_features": total_features,
+            "polygon_features": polygon_count,
+            "multipolygon_features": multipolygon_count,
+            "total_polygon_features": total_polygon_features,
+            "geometry_types": dict(geometry_types),
+            "coordinate_system": str(crs),
+            "bounding_box": {
+                "min_x": bounds[0],
+                "min_y": bounds[1], 
+                "max_x": bounds[2],
+                "max_y": bounds[3]
+            }
+        }
+        
+    except Exception as e:
+        return {"error": f"Error reading shapefile: {str(e)}"}
+
+# Main execution
+if __name__ == "__main__":
+    # Your shapefile path
+    shapefile_path = "/content/naksha.shp"
+    
+    # Count polygons
+    result = count_polygons_in_shapefile(shapefile_path)
+    
+    if "error" in result:
+        print(f"Error: {result['error']}")
+    else:
+        print("=" * 50)
+        print("SHAPEFILE POLYGON COUNT RESULTS")
+        print("=" * 50)
+        print(f"File: {shapefile_path}")
+        print(f"Total Features: {result['total_features']:,}")
+        print(f"Polygon Features: {result['polygon_features']:,}")
+        print(f"MultiPolygon Features: {result['multipolygon_features']:,}")
+        print(f"Total Polygon Features: {result['total_polygon_features']:,}")
+        print(f"Coordinate System: {result['coordinate_system']}")
+        print("\nGeometry Types Breakdown:")
+        for geom_type, count in result['geometry_types'].items():
+            print(f"  {geom_type}: {count:,}")
+        print(f"\nBounding Box:")
+        print(f"  X: {result['bounding_box']['min_x']:.6f} to {result['bounding_box']['max_x']:.6f}")
+        print(f"  Y: {result['bounding_box']['min_y']:.6f} to {result['bounding_box']['max_y']:.6f}")
