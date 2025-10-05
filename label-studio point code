@@ -55,3 +55,74 @@ for img in coco_data['images']:
     print(f"Saved mask: {mask_output_path}")
 
 print("✅ All masks generated.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+label studio direct
+import os
+import json
+import numpy as np
+import cv2
+
+# === CONFIGURATION ===
+input_json_path = "/content/result.json"      # path to your Label Studio-style export
+output_dir = "output_masks"                   # folder to save masks
+mask_value = 255                              # white mask
+# ======================
+
+# Create output folder
+os.makedirs(output_dir, exist_ok=True)
+
+# Load JSON
+with open(input_json_path, "r") as f:
+    data = json.load(f)
+
+# Iterate over each item (image)
+for item in data:
+    image_id = item['id']
+    anns = item.get('annotations', [])
+    if not anns:
+        continue
+
+    # For simplicity, only take first annotation (can be extended)
+    result = anns[0].get('result', [])
+    if not result:
+        continue
+
+    # Assume all results refer to the same image
+    width = result[0]['original_width']
+    height = result[0]['original_height']
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    for obj in result:
+        if obj['type'] != 'polygonlabels':
+            continue
+
+        points = obj['value']['points']  # relative coords (0-1 or larger?)
+        # Convert to absolute pixel coordinates
+        abs_points = np.array([[int(x * width / 100), int(y * height / 100)] for x, y in points], dtype=np.int32)
+        abs_points = abs_points.reshape((-1, 1, 2))
+
+        # Draw filled polygon on mask
+        cv2.fillPoly(mask, [abs_points], mask_value)
+
+    # Save mask
+    mask_filename = f"image_{image_id}_mask.png"
+    cv2.imwrite(os.path.join(output_dir, mask_filename), mask)
+    print(f"✅ Saved mask: {mask_filename}")
+
+print("🎉 All masks generated.")
+
