@@ -1,0 +1,34 @@
+import geopandas as gpd
+
+# Input and output shapefiles
+input_shapefile = "/content/Polygons.shp"
+output_shapefile = "/content/Polygons_cleaned2.shp"
+
+# Load data
+gdf = gpd.read_file(input_shapefile)
+
+# Clean invalid geometries
+gdf = gdf[gdf.is_valid]
+
+# Calculate area
+gdf["area"] = gdf.geometry.area
+
+# Get largest polygon area
+max_area = gdf["area"].max()
+
+# Define threshold: remove polygons smaller than 5% of largest polygon
+threshold = 0.05 * max_area
+
+# Filter
+gdf_cleaned = gdf[gdf["area"] > threshold]
+
+# Save output
+gdf_cleaned.to_file(output_shapefile)
+
+print(f"Original polygons: {len(gdf)}")
+print(f"Cleaned polygons: {len(gdf_cleaned)}")
+print(f"Removed: {len(gdf) - len(gdf_cleaned)} polygons")
+
+
+
+#not accurate output
