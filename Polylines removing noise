@@ -1,0 +1,26 @@
+import geopandas as gpd
+
+input_shapefile = "/content/updated_centerlines.shp"
+output_shapefile = "/content/Polylines_cleaned_small_removed.shp"
+
+gdf = gpd.read_file(input_shapefile)
+gdf = gdf[gdf.is_valid]
+
+# Calculate lengths
+gdf["length"] = gdf.geometry.length
+
+# Get longest line
+max_length = gdf["length"].max()
+
+# Lower threshold (for example, 0.5% or 1%)
+threshold = 0.005 * max_length   # 0.5% of the longest line
+
+# Filter out only very tiny polylines
+gdf_cleaned = gdf[gdf["length"] > threshold]
+
+# Save
+gdf_cleaned.to_file(output_shapefile)
+
+print(f"Original polylines: {len(gdf)}")
+print(f"Cleaned polylines: {len(gdf_cleaned)}")
+print(f"Removed: {len(gdf) - len(gdf_cleaned)} polylines")
