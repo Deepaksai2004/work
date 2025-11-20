@@ -37,3 +37,110 @@ print("GeoTIFF mask created successfully:", output_tif_path)
  
  
 #tif image, png format mask>>> mask as tif format
+
+
+
+
+
+
+# ==============================
+# AUTOMATED GEOREFERENCED MASK CREATION
+# ==============================
+
+from osgeo import gdal, osr
+from PIL import Image
+import numpy as np
+import os
+import glob
+import re
+
+# -------------------------------
+# UPDATE THESE PATHS ONLY
+# -------------------------------
+original_tifs_folder   = r"/content/drive/MyDrive/who_large/output_chips_folder3"                    # folder with chip_0.tif, chip_1.tif, ...
+mask_pngs_folder       = r"/content/drive/MyDrive/who_large/output_chips_folder_predmask"     # folder with chip_0_pred.png, ...
+output_folder          = r"/content/drive/MyDrive/who_large/output_chips_folder_predmask_2011"  # where new_chip_*.tif will be saved
+
+# Create output folder if it doesn't exist
+os.makedirs(output_folder, exist_ok=True)
+
+# -------------------------------
+# Find all original TIFFs
+# -------------------------------
+tif_pattern = os.path.join(original_tifs_folder, "chip_*.tif")
+tif_files = glob.glob(tif_pattern)
+
+# Sort them nicely (chip_0, chip_1, chip_2, ...)
+def natural_key(filename):
+    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', os.path.basename(filename))]
+
+tif_files = sorted(tif_files, key=natural_key)
+
+print(f"Found {len(tif_files)} TIFF chips to process.\n")
+
+# -------------------------------
+# Process each chip
+# -------------------------------
+for idx, original_tif_path in enumerate(tif_files, 1):
+    # Extract the base name (e.g., "chip_42")
+    base_name = os.path.splitext(os.path.basename(original_tif_path))[0]  # "chip_42"
+
+    # Build corresponding mask and output paths
+    mask_png_path   = os.path.join(mask_pngs_folder, f"{base_name}_pred.png")
+    output_tif_path = os.path.join(output_folder, f"new_{base_name}.tif")
+
+    # Skip if mask is missing
+    if not os.path.exists(mask_png_path):
+        print(f"[{idx}/{len(tif_files)}] WARNING: Mask not found → {mask_png_path}  (skipping)")
+        continue
+
+    # Skip if output already exists (uncomment if you want to overwrite)
+    # if os.path.exists(output_tif_path):
+    #     print(f"[{idx}/{len(tif_files)}] Already exists → {output_tif_path}  (skipping)")
+    #     continue
+
+    print(f"[{idx}/{len(tif_files)}] Processing: {base_name}")
+
+    # ------------------- Open original TIFF for georeferencing -------------------
+    original_ds = gdal.Open(original_tif_path)
+    if original_ds is None:
+        print(f"  ERROR: Could not open {original_tif_path}")
+        continue
+
+    geo_transform = original_ds.GetGeoTransform()
+    projection    = original_ds.GetProjection()
+    width         = original_ds.RasterXSize
+    height        = original_ds.RasterYSize
+    original_ds   = None  # close
+
+    # ------------------- Open and resize mask PNG -------------------
+    try:
+        mask_img = Image.open(mask_png_path).convert("L")  # grayscale
+        if mask_img.size != (width, height):
+            print(f"  Resizing mask from {mask_img.size} → ({width}, {height})")
+            mask_img = mask_img.resize((width, height), Image.NEAREST)  # preserve class integers
+        mask_array = np.array(mask_img, dtype=np.uint8)
+    except Exception as e:
+        print(f"  ERROR reading/resizing mask: {e}")
+        continue
+
+    # ------------------- Create new GeoTIFF -------------------
+    driver = gdal.GetDriverByName("GTiff")
+    options = ['COMPRESS=DEFLATE', 'PREDICTOR=2', 'TILED=YES']  # optional compression
+
+    mask_tif = driver.Create(output_tif_path, width, height, 1, gdal.GDT_Byte, options=options)
+    mask_tif.SetGeoTransform(geo_transform)
+    mask_tif.SetProjection(projection)
+
+    # Write data
+    mask_tif.GetRasterBand(1).WriteArray(mask_array)
+
+    # Optional: set NoData value if needed
+    # mask_tif.GetRasterBand(1).SetNoDataValue(255)
+
+    mask_tif.FlushCache()
+    mask_tif = None  # close file
+
+    print(f"  → Saved: {output_tif_path}")
+
+print("\nAll done! GeoTIFF masks created in:", output_folder)
