@@ -1,0 +1,352 @@
+# ==========================
+# MOSAIC FOR 5000+ TIFF FILES
+# GDAL VRT + TRANSLATE METHOD
+# ==========================
+
+from osgeo import gdal
+import glob, os
+
+# Force GDAL to show REAL errors (important)
+gdal.UseExceptions()
+
+# ----------- SET YOUR INPUT FOLDER -----------
+input_folder = "/content/drive/MyDrive/who_large/output_chips_folder_predmask_2011"
+
+# ----------- TEMP VRT FILE (local) -----------
+vrt_path = "/content/mosaic_temp.vrt"
+
+# ----------- FINAL TIFF MOSAIC (local) -------
+output_local = "/content/final_mosaic_predmask_2011.tif"
+
+# ----------- FINAL TIFF MOSAIC (Google Drive) -
+output_drive = "/content/drive/MyDrive/who_large/final_mosaic_predmask_2011.tif"
+
+# ----------- COLLECT ALL .TIF FILES ----------
+tif_files = glob.glob(os.path.join(input_folder, "*.tif"))
+print("Total TIFF files found:", len(tif_files))
+
+if len(tif_files) == 0:
+    raise FileNotFoundError("No TIFFs found. Check folder path.")
+
+# =========================
+#     STEP 1: BUILD VRT
+# =========================
+print("Building VRT...")
+
+gdal.BuildVRT(vrt_path, tif_files)
+
+print("VRT created at:", vrt_path)
+
+# =========================
+#     STEP 2: TRANSLATE
+# =========================
+print("Creating final mosaic...")
+
+gdal.Translate(
+    output_local,
+    vrt_path,
+    creationOptions=["COMPRESS=LZW"]   # compression recommended
+)
+
+print("Local mosaic created:", output_local)
+
+# =========================
+#     STEP 3: COPY TO DRIVE
+# =========================
+!cp /content/final_mosaic_predmask_2011.tif "/content/drive/MyDrive/who_large/final_mosaic_predmask_2011.tif"
+
+print("Mosaic copied to Google Drive:", output_drive)
+#predicted masks chips to largetile mosaic
+
+
+
+
+
+
+
+
+############raster to polygon##############
+from osgeo import gdal, ogr, osr
+import numpy as np
+import os
+import sys
+
+# ======================== PATHS ============================
+input_raster = r"/content/final_mosaic_predmask_2011.tif"
+output_shp   = r"/content/output_polygon50.shp"
+temp_tif     = "/content/temp_poly.tif"   # temporary raster
+# ============================================================
+
+# Open source raster
+ds = gdal.Open(input_raster)
+if ds is None:
+    raise FileNotFoundError(f"Cannot open {input_raster}")
+
+band = ds.GetRasterBand(1)
+arr = band.ReadAsArray()
+
+# Convert to integer if needed
+if arr.dtype not in (np.uint8, np.int8, np.int16, np.int32, np.int64):
+    arr = arr.astype(np.int16)
+
+# Get geotransform and projection
+gt = ds.GetGeoTransform()
+prj = ds.GetProjection()
+
+# Get NoData value
+nodata = band.GetNoDataValue()
+
+# Create temporary integer raster (required for polygonize)
+driver = gdal.GetDriverByName('GTiff')
+tmp_ds = driver.Create(temp_tif, ds.RasterXSize, ds.RasterYSize, 1, gdal.GDT_Int16,
+                       options=['COMPRESS=LZW'])
+tmp_ds.SetGeoTransform(gt)
+tmp_ds.SetProjection(prj)
+
+tmp_band = tmp_ds.GetRasterBand(1)
+tmp_band.WriteArray(arr)
+
+if nodata is not None:
+    tmp_band.SetNoDataValue(nodata)
+
+tmp_band.FlushCache()
+tmp_ds = None  # close temp file
+
+# Re-open temp dataset for polygonization
+tmp_ds = gdal.Open(temp_tif)
+tmp_band = tmp_ds.GetRasterBand(1)
+
+# ------------------- Create shapefile with proper SRS -------------------
+driver = ogr.GetDriverByName('ESRI Shapefile')
+
+if os.path.exists(output_shp):
+    driver.DeleteDataSource(output_shp)
+
+out_ds = driver.CreateDataSource(output_shp)
+
+# === THIS IS THE KEY: Create spatial reference and assign to layer ===
+srs = osr.SpatialReference()
+srs.ImportFromWkt(prj)  # Import from original raster's WKT
+
+# Create layer WITH spatial reference
+layer = out_ds.CreateLayer("polygon", srs=srs, geom_type=ogr.wkbPolygon)
+
+# Add field for pixel values
+field_defn = ogr.FieldDefn("DN", ogr.OFTInteger)  # DN = Digital Number
+layer.CreateField(field_defn)
+
+# Polygonize
+print("Polygonizing... this may take a while for large rasters")
+result = gdal.Polygonize(tmp_band, None, layer, 0, [], callback=None)
+
+if result != 0:
+    print("Warning: Polygonize returned error code:", result)
+
+# Clean up
+out_ds.SyncToDisk()
+out_ds = None
+tmp_ds = None
+
+# Remove temp file
+if os.path.exists(temp_tif):
+    os.remove(temp_tif)
+
+print("🎉 Polygon shapefile created successfully with correct CRS!")
+print(f"    Output: {output_shp}")
+print("    CRS: Same as input raster (WGS84 UTM Zone 41N if that's what your TIFF has)")
+#raster to polygon
+
+
+
+
+
+
+
+
+
+############remove last line from attribute tale###########(to remove bg line in it)
+
+from osgeo import ogr
+
+# === Path to your output shapefile ===
+shp_path = r"/content/output_polygon50.shp"
+
+# Open shapefile for update
+driver = ogr.GetDriverByName("ESRI Shapefile")
+ds = driver.Open(shp_path, 1)   # 1 = read/write
+layer = ds.GetLayer()
+
+feature_count = layer.GetFeatureCount()
+print("Total features:", feature_count)
+
+# ID of last row (OGR starts at 0)
+last_fid = feature_count - 1
+
+# Get and delete last feature
+feat = layer.GetFeature(last_fid)
+if feat:
+    print("Deleting last feature with FID:", last_fid)
+    layer.DeleteFeature(last_fid)
+else:
+    print("No last feature found!")
+
+ds = None  # Close
+
+print("🎉 Last row removed successfully!")
+#Code to remove LAST row from shapefile
+
+
+
+
+
+
+
+
+
+//////////////////////////regularization//////////////////////
+//////optionA////////////////
+!pip install geopandas shapely tqdm -q
+
+import geopandas as gpd
+import numpy as np
+from shapely.geometry import Polygon
+from tqdm import tqdm
+
+# =======================
+# INPUT / OUTPUT
+# =======================
+input_shp  = "/content/output_polygon50.shp"     # change path
+output_shp = "/content/output_A_90deg.shp"
+# =======================
+
+
+def remove_zigzag(poly):
+    return poly.simplify(1.2, preserve_topology=True)
+
+
+def orthogonalize(poly, angle_tol=20):
+    """Force walls to horizontal or vertical directions."""
+    if poly.geom_type != "Polygon":
+        return poly
+
+    coords = list(poly.exterior.coords)
+    new = [coords[0]]
+
+    for i in range(1, len(coords)-1):
+        x1, y1 = new[-1]
+        x2, y2 = coords[i]
+
+        dx = x2 - x1
+        dy = y2 - y1
+
+        angle = np.degrees(np.arctan2(dy, dx)) % 180
+
+        # horizontal
+        if abs(angle - 0) < angle_tol or abs(angle - 180) < angle_tol:
+            new.append((x2, y1))
+
+        # vertical
+        elif abs(angle - 90) < angle_tol:
+            new.append((x1, y2))
+
+        else:
+            new.append((x2, y2))
+
+    new.append(new[0])
+
+    try:
+        return Polygon(new)
+    except:
+        return poly
+
+
+gdf = gpd.read_file(input_shp)
+out_geom = []
+
+print("Running OPTION A: Forcing 90° corners...")
+
+for geom in tqdm(gdf.geometry):
+    g1 = remove_zigzag(geom)
+    g2 = orthogonalize(g1)
+    out_geom.append(g2)
+
+gdf.geometry = out_geom
+gdf.to_file(output_shp)
+
+print("Done! Saved to:", output_shp)
+
+
+
+
+/////optionB///////////
+!pip install geopandas shapely tqdm -q
+
+import geopandas as gpd
+from shapely.geometry import Polygon, LineString
+from shapely.ops import linemerge
+from tqdm import tqdm
+import numpy as np
+
+# =======================
+# INPUT / OUTPUT
+# =======================
+input_shp  = "/content/output_polygon50.shp"     # change path
+output_shp = "/content/output_B_smooth.shp"
+# =======================
+
+
+def remove_zigzag(poly):
+    """Remove pixel boundary effect."""
+    return poly.simplify(1.0, preserve_topology=True)
+
+
+def straighten_edges(poly, seg_threshold=3):
+    """Straightens long edges while keeping original angles."""
+    if poly.geom_type != "Polygon":
+        return poly
+
+    coords = list(poly.exterior.coords)
+    new = [coords[0]]
+
+    for i in range(1, len(coords)-1):
+        x1, y1 = new[-1]
+        x2, y2 = coords[i]
+        x3, y3 = coords[i+1]
+
+        # vectors
+        v1 = np.array([x2 - x1, y2 - y1])
+        v2 = np.array([x3 - x2, y3 - y2])
+
+        # angle between segments
+        angle = abs(np.degrees(np.arctan2(v2[1], v2[0]) -
+                               np.arctan2(v1[1], v1[0])))
+
+        # If angle change is tiny → treat as straight line
+        if angle < seg_threshold:
+            continue
+        else:
+            new.append((x2, y2))
+
+    new.append(new[0])
+
+    try:
+        return Polygon(new)
+    except:
+        return poly
+
+
+gdf = gpd.read_file(input_shp)
+out_geom = []
+
+print("Running OPTION B: Smooth + Straighten edges...")
+
+for geom in tqdm(gdf.geometry):
+    g1 = remove_zigzag(geom)
+    g2 = straighten_edges(g1)
+    out_geom.append(g2)
+
+gdf.geometry = out_geom
+gdf.to_file(output_shp)
+
+print("Done! Saved to:", output_shp)
+
