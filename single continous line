@@ -49,3 +49,148 @@ gdf = gpd.GeoDataFrame(geometry=[simplified], crs=crs)
 gdf.to_file("centerline5.shp")
 
 print("✅ Centerline saved as centerline2.shp with correct CRS")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#another code to raster to centerline extraction 
+
+import cv2
+import numpy as np
+import rasterio
+from skimage.morphology import skeletonize
+from shapely.geometry import LineString, MultiLineString
+from shapely.ops import linemerge, unary_union
+import geopandas as gpd
+
+
+# ----------------------------------------------------
+# STEP 1: Read TIF
+# ----------------------------------------------------
+tif_path = "/content/final_mosaic_predmask_2011_NAK.tif"
+
+with rasterio.open(tif_path) as src:
+    img = src.read(1)
+    transform = src.transform
+    crs = src.crs
+
+
+# ----------------------------------------------------
+# STEP 2: Normalize + Threshold
+# ----------------------------------------------------
+img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+_, binary = cv2.threshold(img_norm, 0, 255, cv2.THRESH_OTSU)
+
+
+# ----------------------------------------------------
+# STEP 3: Morphological cleaning
+# ----------------------------------------------------
+kernel = np.ones((5,5), np.uint8)
+clean = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=2)
+clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+
+# ----------------------------------------------------
+# STEP 4: FAST OPENCV SKELETONIZATION
+# ----------------------------------------------------
+def cv_skeletonize(img):
+    img = img.copy()
+    skel = np.zeros(img.shape, np.uint8)
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3,3))
+    done = False
+
+    while not done:
+        eroded = cv2.erode(img, element)
+        temp = cv2.dilate(eroded, element)
+        temp = cv2.subtract(img, temp)
+        skel = cv2.bitwise_or(skel, temp)
+        img = eroded.copy()
+        done = cv2.countNonZero(img) == 0
+
+    return skel
+
+print("Skeletonizing fast...")
+skeleton = cv_skeletonize(clean)
+
+
+# ----------------------------------------------------
+# STEP 5: REMOVE SMALL BRANCHES BASED ON LENGTH
+# ----------------------------------------------------
+def prune_by_length(skel, min_len=45):
+    pruned = np.zeros_like(skel)
+    contours, _ = cv2.findContours(skel, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    for cnt in contours:
+        if len(cnt) >= min_len:
+            cv2.drawContours(pruned, [cnt], -1, 255, 1)
+    return pruned
+
+print("Pruning minor branches...")
+skeleton = prune_by_length(skeleton, min_len=45)
+
+
+# ----------------------------------------------------
+# STEP 6: Convert Skeleton to LineStrings
+# ----------------------------------------------------
+contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+
+lines = []
+for cnt in contours:
+    if len(cnt) > 3:
+        coords = [rasterio.transform.xy(transform, y, x) for [[x, y]] in cnt]
+        line = LineString(coords)
+        if line.is_valid and line.length > 0:
+            lines.append(line)
+
+
+# ----------------------------------------------------
+# STEP 7: Merge + simplify network
+# ----------------------------------------------------
+multi = MultiLineString(lines)
+merged = linemerge(unary_union(multi))
+
+if isinstance(merged, LineString):
+    merged = MultiLineString([merged])
+
+simplified = merged.simplify(1.2, preserve_topology=True)
+
+
+# ----------------------------------------------------
+# STEP 8: Save output as shapefile
+# ----------------------------------------------------
+gdf = gpd.GeoDataFrame(
+    geometry=[geom for geom in simplified.geoms],
+    crs=crs
+)
+
+gdf.to_file("kenterline_cleaned_final.shp")
+
+print("✅ DONE — small branches removed")
+print("✅ Saved as centerline_cleaned_final.shp")
+
