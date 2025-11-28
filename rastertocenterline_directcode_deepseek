@@ -1,0 +1,589 @@
+import cv2
+import numpy as np
+import rasterio
+from skimage.morphology import skeletonize, binary_closing, square, remove_small_objects, binary_dilation
+from skimage import measure
+from shapely.geometry import LineString, MultiLineString, Point
+from shapely.ops import linemerge, unary_union
+import geopandas as gpd
+from scipy import ndimage
+import networkx as nx
+import math
+
+def aggressive_gap_filling(binary_mask, kernel_size=20, min_size=1000):
+    """
+    Enhanced gap filling with stronger morphological operations
+    """
+    binary = (binary_mask > 0).astype(bool)
+
+    # Progressive closing with multiple kernel sizes
+    for size in [5, 10, 15, 20, kernel_size]:
+        binary = binary_closing(binary, square(size))
+
+    # Dilate slightly to ensure connectivity
+    binary = binary_dilation(binary, square(3))
+
+    # Remove small noise
+    binary = remove_small_objects(binary, min_size=min_size)
+
+    return (binary.astype(np.uint8) * 255)
+
+def build_graph_from_skeleton(skeleton):
+    """Build NetworkX graph from skeleton"""
+    rows, cols = np.nonzero(skeleton)
+    pixels = list(zip(rows, cols))
+
+    if not pixels:
+        return nx.Graph()
+
+    G = nx.Graph()
+    for pixel in pixels:
+        G.add_node(pixel)
+
+    # 8-connectivity
+    directions = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
+
+    for r, c in pixels:
+        for dr, dc in directions:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < skeleton.shape[0] and 0 <= nc < skeleton.shape[1] and skeleton[nr, nc]:
+                dist = math.sqrt(dr**2 + dc**2)
+                G.add_edge((r, c), (nr, nc), weight=dist)
+
+    return G
+
+def aggressive_branch_pruning(G, min_branch_length=150):
+    """
+    Aggressively prune short branches from the skeleton graph
+    This removes spurious branches while keeping main roads
+    """
+    if not G.nodes:
+        return G
+
+    max_iterations = 20
+    iteration = 0
+
+    while iteration < max_iterations:
+        iteration += 1
+        removed = False
+
+        # Find all endpoints (degree 1 nodes)
+        endpoints = [n for n in G.nodes if G.degree(n) == 1]
+
+        for ep in endpoints:
+            if ep not in G:
+                continue
+
+            # Trace the branch from this endpoint
+            path = []
+            length = 0.0
+            current = ep
+            path.append(current)
+
+            # Follow the branch until we hit a junction or another endpoint
+            while True:
+                neighbors = [nb for nb in G[current] if nb not in path]
+
+                if not neighbors:
+                    # Dead end
+                    break
+
+                if len(neighbors) > 1:
+                    # Junction - stop here
+                    break
+
+                next_node = neighbors[0]
+                length += G[current][next_node]['weight']
+                path.append(next_node)
+                current = next_node
+
+                # If we reach another endpoint, stop
+                if G.degree(current) == 1:
+                    break
+
+            # If the branch is too short, remove it
+            if length < min_branch_length:
+                # Remove all nodes except the last one if it's a junction
+                if G.degree(current) > 2:
+                    remove_nodes = path[:-1]
+                else:
+                    remove_nodes = path
+
+                for node in remove_nodes:
+                    if node in G:
+                        G.remove_node(node)
+                removed = True
+
+        if not removed:
+            break
+
+    return G
+
+def extract_paths_from_graph(G):
+    """Extract continuous paths from graph"""
+    if not G.nodes:
+        return []
+
+    paths = []
+    visited_edges = set()
+
+    # Find endpoints and junctions (degree != 2)
+    key_points = [n for n in G.nodes if G.degree(n) != 2]
+
+    # If no key points, handle cycles
+    if not key_points and G.nodes:
+        # Pick an arbitrary starting point
+        key_points = [list(G.nodes)[0]]
+
+    for start in key_points:
+        for neighbor in list(G[start]):
+            edge = tuple(sorted((start, neighbor)))
+            if edge in visited_edges:
+                continue
+
+            visited_edges.add(edge)
+            path = [start, neighbor]
+            current = neighbor
+
+            # Follow the path through degree-2 nodes
+            while G.degree(current) == 2 and current in G:
+                neighbors = [nb for nb in G[current] if nb != path[-2]]
+                if not neighbors:
+                    break
+                next_node = neighbors[0]
+                edge = tuple(sorted((current, next_node)))
+                if edge in visited_edges:
+                    break
+                visited_edges.add(edge)
+                path.append(next_node)
+                current = next_node
+
+            if len(path) >= 2:
+                paths.append(path)
+
+    return paths
+
+def fit_line_ransac(points, residual_threshold=3.0, max_trials=200):
+    """
+    Fit a straight line to points using RANSAC
+    More aggressive straightening with lower threshold
+    """
+    points = np.array(points)
+    if len(points) < 2:
+        return points.tolist()
+
+    if len(points) == 2:
+        return points.tolist()
+
+    best_inliers = []
+    best_model = None
+    best_score = 0
+
+    for _ in range(max_trials):
+        # Randomly sample 2 points
+        idx = np.random.choice(len(points), 2, replace=False)
+        p1, p2 = points[idx]
+
+        if np.allclose(p1, p2):
+            continue
+
+        # Line direction
+        direction = p2 - p1
+        norm = np.linalg.norm(direction)
+        if norm < 1e-6:
+            continue
+        direction = direction / norm
+
+        # Calculate perpendicular distance of all points to this line
+        p1_to_points = points - p1
+        projections = np.dot(p1_to_points, direction)
+        closest_points = p1 + projections[:, np.newaxis] * direction
+        distances = np.linalg.norm(points - closest_points, axis=1)
+
+        inliers = distances < residual_threshold
+        score = np.sum(inliers)
+
+        if score > best_score:
+            best_score = score
+            best_inliers = inliers
+            best_model = (p1, p2)
+
+    if best_model is None or np.sum(best_inliers) < 2:
+        return fit_line_pca(points)
+
+    # Get inlier points and find extremes along the line direction
+    inlier_points = points[best_inliers]
+    p1, p2 = best_model
+    direction = p2 - p1
+    direction = direction / np.linalg.norm(direction)
+
+    # Project points onto line direction
+    projections = np.dot(inlier_points - p1, direction)
+    min_idx = np.argmin(projections)
+    max_idx = np.argmax(projections)
+
+    start = inlier_points[min_idx]
+    end = inlier_points[max_idx]
+
+    return [start.tolist(), end.tolist()]
+
+def fit_line_pca(points):
+    """Fit line using PCA (fallback method)"""
+    points = np.array(points)
+    if len(points) < 2:
+        return points.tolist()
+
+    # Center the points
+    centroid = np.mean(points, axis=0)
+    centered = points - centroid
+
+    # PCA
+    cov = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eig(cov)
+
+    # Principal direction
+    principal_direction = eigenvectors[:, np.argmax(eigenvalues)]
+
+    # Project points onto principal direction
+    projections = np.dot(centered, principal_direction)
+    min_idx = np.argmin(projections)
+    max_idx = np.argmax(projections)
+
+    return [points[min_idx].tolist(), points[max_idx].tolist()]
+
+def calculate_line_length(line):
+    """Calculate Euclidean length of a line"""
+    if len(line) < 2:
+        return 0.0
+    p1, p2 = np.array(line[0]), np.array(line[1])
+    return np.linalg.norm(p2 - p1)
+
+def straighten_paths(paths, method='ransac', min_length=80):
+    """
+    Convert curved paths to straight lines with stricter filtering
+    """
+    straight_paths = []
+
+    for path in paths:
+        if len(path) < 2:
+            continue
+
+        # Calculate original path length (along skeleton)
+        path_array = np.array(path)
+        if len(path_array) < 2:
+            continue
+
+        diffs = np.diff(path_array, axis=0)
+        skeleton_length = np.sum(np.sqrt(np.sum(diffs**2, axis=1)))
+
+        if skeleton_length < min_length:
+            continue
+
+        # Fit straight line
+        if method == 'ransac' and len(path) > 2:
+            straight_line = fit_line_ransac(path, residual_threshold=3.0)
+        else:
+            straight_line = fit_line_pca(path)
+
+        # Check that the straight line is also long enough
+        straight_length = calculate_line_length(straight_line)
+
+        if straight_length >= min_length * 0.7:  # Allow some tolerance
+            straight_paths.append(straight_line)
+
+    return straight_paths
+
+def merge_collinear_lines(lines, distance_threshold=50, angle_threshold=10):
+    """
+    Enhanced merging with stricter angle tolerance and iterative approach
+    """
+    if not lines:
+        return []
+
+    lines = [line[:] for line in lines]
+    angle_threshold_rad = math.radians(angle_threshold)
+
+    def get_line_info(line):
+        """Get normalized direction vector and endpoints"""
+        p1, p2 = np.array(line[0]), np.array(line[1])
+        vec = p2 - p1
+        length = np.linalg.norm(vec)
+        direction = vec / length if length > 0 else np.zeros_like(vec)
+        return p1, p2, direction, length
+
+    def angle_between_vectors(v1, v2):
+        """Calculate angle between two vectors"""
+        dot = np.clip(np.dot(v1, v2), -1.0, 1.0)
+        return math.acos(dot)
+
+    def point_to_line_distance(point, line_start, line_dir):
+        """Calculate perpendicular distance from point to infinite line"""
+        ap = point - line_start
+        projection = np.dot(ap, line_dir) * line_dir
+        perpendicular = ap - projection
+        return np.linalg.norm(perpendicular)
+
+    merged = True
+    iteration = 0
+    max_iterations = 50
+
+    while merged and iteration < max_iterations:
+        merged = False
+        iteration += 1
+        i = 0
+
+        while i < len(lines):
+            p1_i, p2_i, dir_i, len_i = get_line_info(lines[i])
+
+            j = i + 1
+            while j < len(lines):
+                p1_j, p2_j, dir_j, len_j = get_line_info(lines[j])
+
+                # Check angle similarity (consider both directions)
+                angle = angle_between_vectors(dir_i, dir_j)
+                angle = min(angle, math.pi - angle)
+
+                if angle > angle_threshold_rad:
+                    j += 1
+                    continue
+
+                # Check collinearity - both endpoints should be close to the other line
+                dist1 = point_to_line_distance(p1_j, p1_i, dir_i)
+                dist2 = point_to_line_distance(p2_j, p1_i, dir_i)
+
+                if max(dist1, dist2) > distance_threshold * 0.5:
+                    j += 1
+                    continue
+
+                # Check endpoint proximity
+                endpoints_i = [p1_i, p2_i]
+                endpoints_j = [p1_j, p2_j]
+
+                min_dist = float('inf')
+                for ei in endpoints_i:
+                    for ej in endpoints_j:
+                        dist = np.linalg.norm(ei - ej)
+                        min_dist = min(min_dist, dist)
+
+                if min_dist < distance_threshold:
+                    # Merge the lines
+                    all_points = [p1_i.tolist(), p2_i.tolist(), p1_j.tolist(), p2_j.tolist()]
+                    merged_line = fit_line_pca(all_points)
+
+                    lines[i] = merged_line
+                    del lines[j]
+                    merged = True
+                    break
+                else:
+                    j += 1
+
+            if merged:
+                break
+            i += 1
+
+    return lines
+
+def extend_line_segments(lines, extension_distance=20):
+    """
+    Slightly extend line segments to help connect nearby roads
+    """
+    extended = []
+
+    for line in lines:
+        if len(line) < 2:
+            continue
+
+        p1, p2 = np.array(line[0]), np.array(line[1])
+        direction = p2 - p1
+        length = np.linalg.norm(direction)
+
+        if length < 1e-6:
+            continue
+
+        direction = direction / length
+
+        # Extend both ends
+        new_p1 = p1 - direction * extension_distance
+        new_p2 = p2 + direction * extension_distance
+
+        extended.append([new_p1.tolist(), new_p2.tolist()])
+
+    return extended
+
+def remove_duplicate_lines(lines, tolerance=5.0):
+    """
+    Remove duplicate or nearly duplicate lines
+    """
+    if not lines:
+        return []
+
+    unique_lines = []
+
+    for line in lines:
+        is_duplicate = False
+        p1, p2 = np.array(line[0]), np.array(line[1])
+
+        for unique_line in unique_lines:
+            u1, u2 = np.array(unique_line[0]), np.array(unique_line[1])
+
+            # Check if endpoints are very close
+            if (np.linalg.norm(p1 - u1) < tolerance and np.linalg.norm(p2 - u2) < tolerance) or \
+               (np.linalg.norm(p1 - u2) < tolerance and np.linalg.norm(p2 - u1) < tolerance):
+                is_duplicate = True
+                break
+
+        if not is_duplicate:
+            unique_lines.append(line)
+
+    return unique_lines
+
+def process_mask_to_straight_centerlines(mask_path, output_shp,
+                                         gap_fill_kernel=40,
+                                         min_component_size=2000,
+                                         min_branch_length=120,
+                                         min_line_length=80,
+                                         merge_distance=80,
+                                         merge_angle=10,
+                                         extend_lines=True):
+    """
+    Enhanced processing pipeline with aggressive filtering
+    """
+    print("Reading mask...")
+    with rasterio.open(mask_path) as src:
+        mask = src.read(1)
+        transform = src.transform
+        crs = src.crs
+        print(f"Image size: {mask.shape}")
+
+    # Normalize
+    print("Preprocessing...")
+    mask_norm = cv2.normalize(mask, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _, binary = cv2.threshold(mask_norm, 127, 255, cv2.THRESH_BINARY)
+
+    # Aggressive gap filling
+    print("Filling gaps (this improves connectivity)...")
+    filled = aggressive_gap_filling(binary, kernel_size=gap_fill_kernel, min_size=min_component_size)
+
+    # Skeletonize
+    print("Skeletonizing...")
+    skeleton = skeletonize(filled > 0)
+    skeleton = (skeleton.astype(np.uint8) * 255)
+
+    # Label components
+    print("Processing connected components...")
+    labels, num_components = measure.label(skeleton > 0, return_num=True, connectivity=2)
+    print(f"Found {num_components} components")
+
+    all_paths = []
+
+    for i in range(1, num_components + 1):
+        component_mask = (labels == i)
+        component_size = np.sum(component_mask)
+
+        # Skip very small components
+        if component_size < 50:
+            continue
+
+        # Build graph
+        G = build_graph_from_skeleton(component_mask)
+        if not G.nodes:
+            continue
+
+        # Aggressive branch pruning
+        G = aggressive_branch_pruning(G, min_branch_length=min_branch_length)
+
+        if not G.nodes:
+            continue
+
+        # Extract paths
+        paths = extract_paths_from_graph(G)
+        all_paths.extend(paths)
+
+    print(f"Extracted {len(all_paths)} raw paths")
+
+    # Straighten paths
+    print("Straightening lines with RANSAC...")
+    straight_paths = straighten_paths(all_paths, method='ransac', min_length=min_line_length)
+    print(f"After straightening: {len(straight_paths)} lines")
+
+    # Remove very short lines
+    straight_paths = [p for p in straight_paths if calculate_line_length(p) >= min_line_length]
+    print(f"After length filter: {len(straight_paths)} lines")
+
+    # Optional: Extend lines slightly
+    if extend_lines:
+        print("Extending line segments...")
+        straight_paths = extend_line_segments(straight_paths, extension_distance=15)
+
+    # Merge collinear lines (multiple passes)
+    print("Merging collinear lines (pass 1)...")
+    merged_paths = merge_collinear_lines(straight_paths,
+                                         distance_threshold=merge_distance,
+                                         angle_threshold=merge_angle)
+    print(f"After merge pass 1: {len(merged_paths)} lines")
+
+    # Second merge pass with slightly relaxed parameters
+    print("Merging collinear lines (pass 2)...")
+    merged_paths = merge_collinear_lines(merged_paths,
+                                         distance_threshold=merge_distance * 1.5,
+                                         angle_threshold=merge_angle * 1.5)
+    print(f"After merge pass 2: {len(merged_paths)} lines")
+
+    # Remove duplicates
+    print("Removing duplicates...")
+    merged_paths = remove_duplicate_lines(merged_paths, tolerance=10.0)
+    print(f"After deduplication: {len(merged_paths)} lines")
+
+    # Final length filter
+    merged_paths = [p for p in merged_paths if calculate_line_length(p) >= min_line_length]
+    print(f"Final line count: {len(merged_paths)}")
+
+    # Convert to georeferenced lines
+    print("Creating shapefile...")
+    lines = []
+    for path in merged_paths:
+        # Convert from pixel to geographic coordinates
+        coords_geo = [rasterio.transform.xy(transform, y, x) for (y, x) in path]
+        line = LineString(coords_geo)
+        if line.is_valid and line.length > 0:
+            lines.append(line)
+
+    if not lines:
+        print("WARNING: No lines to save!")
+        return None, filled, skeleton
+
+    # Create GeoDataFrame
+    gdf = gpd.GeoDataFrame(geometry=lines, crs=crs)
+    gdf['length'] = gdf.geometry.length
+    gdf['id'] = range(1, len(gdf) + 1)
+
+    # Save
+    gdf.to_file(output_shp)
+    print(f"✓ Saved {len(gdf)} centerlines to {output_shp}")
+
+    return gdf, filled, skeleton
+
+# Usage
+if __name__ == "__main__":
+    mask_path = "/content/final_mosaic_predmask_2011_NAK.tif"
+    output_shp = "straight_connected_centerlines_clean3.shp"
+
+    gdf, filled_mask, skeleton = process_mask_to_straight_centerlines(
+        mask_path=mask_path,
+        output_shp=output_shp,
+        gap_fill_kernel=40,          # Larger kernel for better gap filling
+        min_component_size=2000,     # Ignore small noise components
+        min_branch_length=150,       # Remove short branches aggressively
+        min_line_length=80,          # Keep only significant roads
+        merge_distance=80,           # Merge lines within 50 pixels
+        merge_angle=10,              # Merge only nearly parallel lines
+        extend_lines=True            # Extend lines to help merging
+    )
+
+    if gdf is not None:
+        print(f"\n✓ SUCCESS!")
+        print(f"Total centerlines: {len(gdf)}")
+        print(f"Total length: {gdf['length'].sum():.2f} units")
+        print(f"Average length: {gdf['length'].mean():.2f} units")
+        print(f"Min length: {gdf['length'].min():.2f} units")
+        print(f"Max length: {gdf['length'].max():.2f} units")
