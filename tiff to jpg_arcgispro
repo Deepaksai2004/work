@@ -1,0 +1,14 @@
+from osgeo import gdal
+
+input_tif = r"D:\WEBAPP\Bahrain_Sat Image\Bharain_buildnew.tif"
+output_jpg = r"D:\WEBAPP\Bahrain_Sat Image\Bharain_buildnew.jpg"
+
+gdal.Translate(
+    output_jpg,
+    input_tif,
+    format='JPEG',
+    outputType=gdal.GDT_Byte,   # 8-bit
+    scaleParams=[]              # auto scale
+)
+
+print("Conversion done ✅")
