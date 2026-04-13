@@ -1,0 +1,14 @@
+import os
+
+folder_path = r"D:\Europe Solar Panels\Dataset\T1_D5\masks"
+
+for filename in os.listdir(folder_path):
+    if filename.startswith("chip_"):
+        new_name = filename.replace("chip_", "chip19_")
+        
+        old_path = os.path.join(folder_path, filename)
+        new_path = os.path.join(folder_path, new_name)
+        
+        os.rename(old_path, new_path)
+
+print("Renaming completed!")
