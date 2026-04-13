@@ -1,0 +1,79 @@
+import os
+import rasterio
+from rasterio.features import shapes
+import geopandas as gpd
+from shapely.geometry import shape
+import numpy as np
+import cv2
+
+# Folders
+tif_folder = r"D:\Europe Solar Panels\Dataset\Chips"
+mask_folder = r"D:\Europe Solar Panels\Dataset\Masks"
+output_folder = r"D:\Europe Solar Panels\Dataset\shp"
+
+# Create output folder if not exists
+os.makedirs(output_folder, exist_ok=True)
+
+# Get all tif files
+tif_files = [f for f in os.listdir(tif_folder) if f.endswith(".tif")]
+
+print(f"Total files found: {len(tif_files)}")
+
+for tif_file in tif_files:
+    try:
+        # Construct paths
+        tif_path = os.path.join(tif_folder, tif_file)
+        
+        # Assuming same naming: chip_1.tif → chip_1.png
+        mask_file = tif_file.replace(".tif", ".png")
+        mask_path = os.path.join(mask_folder, mask_file)
+
+        # Output shapefile name
+        shp_name = tif_file.replace(".tif", ".shp")
+        output_shp = os.path.join(output_folder, shp_name)
+
+        # Skip if mask not exists
+        if not os.path.exists(mask_path):
+            print(f"Mask not found for {tif_file}, skipping...")
+            continue
+
+        # Read mask
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        _, binary_mask = cv2.threshold(mask, 127, 1, cv2.THRESH_BINARY)
+
+        # Read tif (geo info)
+        with rasterio.open(tif_path) as src:
+            transform = src.transform
+            crs = src.crs
+
+        # Extract shapes
+        results = shapes(binary_mask.astype(np.uint8), transform=transform)
+
+        geoms = []
+        values = []
+
+        for geom, value in results:
+            if value == 1:
+                geoms.append(shape(geom))
+                values.append(value)
+
+        # Skip empty masks
+        if len(geoms) == 0:
+            print(f"No features in {tif_file}, skipping...")
+            continue
+
+        # Create GeoDataFrame
+        gdf = gpd.GeoDataFrame({'value': values}, geometry=geoms, crs=crs)
+
+        # Optional cleaning (recommended)
+        gdf = gdf[gdf.geometry.area > 1]
+
+        # Save shapefile
+        gdf.to_file(output_shp)
+
+        print(f"✅ Done: {shp_name}")
+
+    except Exception as e:
+        print(f"❌ Error processing {tif_file}: {e}")
+
+print("🎯 All files processed!")
