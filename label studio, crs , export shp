@@ -1,0 +1,78 @@
+# ==============================
+# INSTALL LIBRARIES
+# ==============================
+!pip install rasterio geopandas shapely fiona tqdm
+
+# ==============================
+# IMPORTS
+# ==============================
+import os
+import rasterio
+from rasterio.features import shapes
+import geopandas as gpd
+from shapely.geometry import shape
+from tqdm import tqdm
+
+# ==============================
+# PATHS
+# ==============================
+input_folder = "/content/drive/MyDrive/Bahrain/withcrs"
+output_shp = "/content/all_polygonsfinal.shp"
+
+# ==============================
+# TIFF → POLYGONS
+# ==============================
+all_polygons = []
+crs_used = None
+
+tif_files = [f for f in os.listdir(input_folder) if f.endswith(".tif")]
+
+for tif_file in tqdm(tif_files):
+    tif_path = os.path.join(input_folder, tif_file)
+    
+    with rasterio.open(tif_path) as src:
+        image = src.read(1)
+        mask = image > 0   # valid pixels
+        
+        if crs_used is None:
+            crs_used = src.crs
+        
+        for geom, value in shapes(image, mask=mask, transform=src.transform):
+            all_polygons.append(shape(geom))
+
+# ==============================
+# CREATE GDF
+# ==============================
+gdf = gpd.GeoDataFrame(geometry=all_polygons, crs=crs_used)
+
+# ==============================
+# FIX CRS (IMPORTANT)
+# ==============================
+if gdf.crs.is_geographic:
+    print("⚠️ Converting to projected CRS (UTM)...")
+    gdf = gdf.to_crs(epsg=32639)  # Bahrain UTM zone
+
+# ==============================
+# ADD AREA & PERIMETER
+# ==============================
+gdf["area_m2"] = gdf.geometry.area
+gdf["perimeter_m"] = gdf.geometry.length
+
+# ==============================
+# ADD FID_1 COLUMN
+# ==============================
+gdf["FID_1"] = 1  # or range(1, len(gdf)+1)
+
+# ==============================
+# OPTIONAL: REMOVE SMALL NOISE
+# ==============================
+# gdf = gdf[gdf["area_m2"] > 5]
+
+# ==============================
+# SAVE SHAPEFILE
+# ==============================
+gdf.to_file(output_shp)
+
+print("✅ Done!")
+print("📁 Saved:", output_shp)
+print("📊 Total polygons:", len(gdf))
