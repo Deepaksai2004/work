@@ -1,0 +1,176 @@
+from osgeo import gdal
+from PIL import Image
+import numpy as np
+import os
+import glob
+import re
+
+# -------------------------------
+# PATHS
+# -------------------------------
+original_tifs_folder = r"D:/Europe Solar Panels/Dataset/D9/chips"
+mask_pngs_folder     = r"D:/Europe Solar Panels/Dataset/D9/masks"
+output_folder        = r"D:/Europe Solar Panels/Dataset/D9/withcrs"
+
+os.makedirs(output_folder, exist_ok=True)
+
+# -------------------------------
+# Get all TIFF files
+# -------------------------------
+tif_files = glob.glob(os.path.join(original_tifs_folder, "*.tif"))
+
+def natural_key(filename):
+    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', os.path.basename(filename))]
+
+tif_files = sorted(tif_files, key=natural_key)
+
+print(f"Found {len(tif_files)} TIFF chips.\n")
+
+# -------------------------------
+# Process
+# -------------------------------
+for idx, original_tif_path in enumerate(tif_files, 1):
+
+    base_name = os.path.splitext(os.path.basename(original_tif_path))[0]
+    # Example: chip14_7
+
+    mask_png_path   = os.path.join(mask_pngs_folder, f"{base_name}.png")
+    output_tif_path = os.path.join(output_folder, f"{base_name}.tif")
+
+    if not os.path.exists(mask_png_path):
+        print(f"[{idx}] Missing mask → {mask_png_path}")
+        continue
+
+    print(f"[{idx}] Processing: {base_name}")
+
+    # --- Read original TIFF ---
+    ds = gdal.Open(original_tif_path)
+    if ds is None:
+        print("  ERROR opening TIFF")
+        continue
+
+    geo_transform = ds.GetGeoTransform()
+    projection    = ds.GetProjection()
+    width         = ds.RasterXSize
+    height        = ds.RasterYSize
+    ds = None
+
+    # --- Read mask ---
+    try:
+        mask_img = Image.open(mask_png_path).convert("L")
+
+        if mask_img.size != (width, height):
+            print(f"  Resizing {mask_img.size} → ({width},{height})")
+            mask_img = mask_img.resize((width, height), Image.NEAREST)
+
+        mask_array = np.array(mask_img, dtype=np.uint8)
+
+    except Exception as e:
+        print(f"  ERROR mask: {e}")
+        continue
+
+    # --- Create GeoTIFF ---
+    driver = gdal.GetDriverByName("GTiff")
+    out_ds = driver.Create(output_tif_path, width, height, 1, gdal.GDT_Byte)
+
+    out_ds.SetGeoTransform(geo_transform)
+    out_ds.SetProjection(projection)
+    out_ds.GetRasterBand(1).WriteArray(mask_array)
+
+    out_ds.FlushCache()
+    out_ds = None
+
+    print(f"  Saved → {output_tif_path}")
+
+print("\n✅ Done!")
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==============================
+# INSTALL LIBRARIES
+# ==============================
+
+
+# ==============================
+# IMPORTS
+# ==============================
+import os
+import rasterio
+from rasterio.features import shapes
+import geopandas as gpd
+from shapely.geometry import shape
+from tqdm import tqdm
+
+# ==============================
+# PATHS
+# ==============================
+input_folder = "D:/Europe Solar Panels/Dataset/D9/withcrs"
+output_shp = "D:/Europe Solar Panels/Dataset/D9/shp/all_polygonsfinal.shp"
+
+# ==============================
+# TIFF → POLYGONS
+# ==============================
+all_polygons = []
+crs_used = None
+
+tif_files = [f for f in os.listdir(input_folder) if f.endswith(".tif")]
+
+for tif_file in tqdm(tif_files):
+    tif_path = os.path.join(input_folder, tif_file)
+    
+    with rasterio.open(tif_path) as src:
+        image = src.read(1)
+        mask = image > 0   # valid pixels
+        
+        if crs_used is None:
+            crs_used = src.crs
+        
+        for geom, value in shapes(image, mask=mask, transform=src.transform):
+            all_polygons.append(shape(geom))
+
+# ==============================
+# CREATE GDF
+# ==============================
+gdf = gpd.GeoDataFrame(geometry=all_polygons, crs=crs_used)
+
+# ==============================
+# FIX CRS (IMPORTANT)
+# ==============================
+if gdf.crs.is_geographic:
+    print("⚠️ Converting to projected CRS (UTM)...")
+    gdf = gdf.to_crs(epsg=32639)  # Bahrain UTM zone
+
+# ==============================
+# ADD AREA & PERIMETER
+# ==============================
+gdf["area_m2"] = gdf.geometry.area
+gdf["perimeter_m"] = gdf.geometry.length
+
+# ==============================
+# ADD FID_1 COLUMN
+# ==============================
+gdf["FID_1"] = 1  # or range(1, len(gdf)+1)
+
+# ==============================
+# OPTIONAL: REMOVE SMALL NOISE
+# ==============================
+# gdf = gdf[gdf["area_m2"] > 5]
+
+# ==============================
+# SAVE SHAPEFILE
+# ==============================
+gdf.to_file(output_shp)
+
+print("✅ Done!")
+print("📁 Saved:", output_shp)
+print("📊 Total polygons:", len(gdf))
