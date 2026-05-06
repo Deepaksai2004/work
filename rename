@@ -38,3 +38,46 @@ for i, file in enumerate(files):
     os.rename(old_path, new_path)
 
 print("Renaming completed!")
+
+
+
+
+
+
+
+#rename another code 
+import os
+
+folder_path = r"D:/Oil Pad/Oil_Tanker/D2/chips"
+
+files = sorted([f for f in os.listdir(folder_path) if f.endswith(".tif")])
+
+start_number = 42
+
+# -----------------------------
+# STEP 1: Rename temporarily
+# -----------------------------
+temp_files = []
+
+for i, file in enumerate(files):
+    old_path = os.path.join(folder_path, file)
+
+    temp_name = f"temp_{i}.tif"
+    temp_path = os.path.join(folder_path, temp_name)
+
+    os.rename(old_path, temp_path)
+
+    temp_files.append(temp_name)
+
+# -----------------------------
+# STEP 2: Final rename
+# -----------------------------
+for i, temp_file in enumerate(temp_files):
+    temp_path = os.path.join(folder_path, temp_file)
+
+    new_name = f"chip_{start_number + i}.tif"
+    new_path = os.path.join(folder_path, new_name)
+
+    os.rename(temp_path, new_path)
+
+print("Renaming completed successfully!")
