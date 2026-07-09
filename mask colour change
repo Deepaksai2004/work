@@ -1,0 +1,48 @@
+from PIL import Image
+import numpy as np
+import os
+import glob
+
+# ============================
+# Input and Output folders
+# ============================
+input_folder = r"D:\BasemapModelsFolder\OilpadBasemap\newoilpadmasks"
+output_folder = r"D:\BasemapModelsFolder\OilpadBasemap\newoilpadmasks_red"
+
+os.makedirs(output_folder, exist_ok=True)
+
+# ============================
+# Process all PNG masks
+# ============================
+mask_files = glob.glob(os.path.join(input_folder, "*.png"))
+
+print(f"Found {len(mask_files)} masks.")
+
+for mask_path in mask_files:
+
+    # Read mask
+    mask = np.array(Image.open(mask_path))
+
+    # If RGB, use first channel
+    if len(mask.shape) == 3:
+        mask = mask[:, :, 0]
+
+    # Binary foreground
+    foreground = mask > 0
+
+    # Create RGB image
+    color_mask = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+
+    # Dark Red (RGB)
+    color_mask[foreground] = [128, 0, 0]
+
+    # Save
+    filename = os.path.basename(mask_path)
+    save_path = os.path.join(output_folder, filename)
+
+    Image.fromarray(color_mask).save(save_path)
+
+    print(f"✓ {filename}")
+
+print("\nDone!")
+print("Output folder:", output_folder)
