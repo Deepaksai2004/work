@@ -81,3 +81,49 @@ for i, temp_file in enumerate(temp_files):
     os.rename(temp_path, new_path)
 
 print("Renaming completed successfully!")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import os
+
+folder_path = r"D:\BasemapModelsFolder\Sea lines\D4\masks"
+
+files = sorted([f for f in os.listdir(folder_path) if f.endswith(".png")])
+
+# Step 1: Rename to temporary names
+for i, file in enumerate(files):
+    old_path = os.path.join(folder_path, file)
+    temp_path = os.path.join(folder_path, f"temp_{i}.tif")
+    os.rename(old_path, temp_path)
+
+# Step 2: Rename to final names
+temp_files = sorted([f for f in os.listdir(folder_path) if f.startswith("temp_")])
+
+start_number = 528
+
+for i, file in enumerate(temp_files):
+    old_path = os.path.join(folder_path, file)
+    new_path = os.path.join(folder_path, f"chip_{start_number + i}.png")
+    os.rename(old_path, new_path)
+
+print("Renaming completed!")
