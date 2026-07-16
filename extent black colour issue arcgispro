@@ -58,3 +58,53 @@ src = None
 print("\nDone!")
 print("Saved to:")
 print(output_raster)
+
+
+
+
+
+
+
+
+
+import arcpy
+import os
+
+arcpy.env.overwriteOutput = True
+
+# Input raster
+input_raster = r"D:\Arcgispro\new\1007\1007.gdb\T31UES_2026050_Composit_Clip"
+
+# Output folder
+output_folder = r"D:\Dr sir data\test"
+
+# Output TIFF
+output_raster = os.path.join(output_folder, "10mNewData.tif")
+
+# Copy raster
+arcpy.management.CopyRaster(
+    in_raster=input_raster,
+    out_rasterdataset=output_raster,
+    format="TIFF"
+)
+
+print("Raster exported successfully!")
+print("Output:", output_raster)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
