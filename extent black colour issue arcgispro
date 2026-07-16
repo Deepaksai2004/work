@@ -1,0 +1,60 @@
+from osgeo import gdal
+import os
+
+# ============================================================
+# Input files
+# ============================================================
+input_raster = r"D:\Arcgispro\new\1007\T31UES_2026050_Compo_3.tif"
+cutline_shp = r"D:\Dr sir data\shp\shp.shp"
+
+# ============================================================
+# Output
+# ============================================================
+output_raster = r"D:\Dr sir data\new_10mdata\10m_sentineldata.tif"
+
+os.makedirs(os.path.dirname(output_raster), exist_ok=True)
+
+# ============================================================
+# Open input raster
+# ============================================================
+src = gdal.Open(input_raster)
+
+if src is None:
+    raise Exception("Unable to open input raster.")
+
+# Get original NoData value
+band = src.GetRasterBand(1)
+nodata = band.GetNoDataValue()
+
+if nodata is None:
+    nodata = 0
+
+# ============================================================
+# Warp (Clip)
+# ============================================================
+warp_options = gdal.WarpOptions(
+    format="GTiff",
+    cutlineDSName=cutline_shp,
+    cropToCutline=True,
+    dstNodata=nodata,
+    multithread=True,
+    creationOptions=[
+        "COMPRESS=LZW",
+        "TILED=YES",
+        "BIGTIFF=IF_SAFER"
+    ]
+)
+
+print("Clipping raster...")
+
+gdal.Warp(
+    destNameOrDestDS=output_raster,
+    srcDSOrSrcDSTab=src,
+    options=warp_options
+)
+
+src = None
+
+print("\nDone!")
+print("Saved to:")
+print(output_raster)
